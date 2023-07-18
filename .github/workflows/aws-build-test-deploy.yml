@@ -2,40 +2,41 @@ name: AWS Build-Test-Deploy
 
 on:
   push:
-    branches-ignore:
-      - main
+    branches: [main]
+  pull_request:
+    branches: [main]
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v2
+      - name: Checkout code
+        uses: actions/checkout@v2
 
-    - name: Build Docker image
-      run: docker build . -t challenge:${{ github.sha }} -t challenge:latest
+      - name: Log in to GitHub Container Registry
+        run: echo "${{ secrets.REPOS_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
 
-    - name: Push Docker image
-      run: |
-        echo ${{ secrets.AWS_LOGIN_PASSWORD }} | docker login -u AWS --password-stdin https://public.ecr.aws/b3h0q7i6
-        docker tag challenge:${{ github.sha }} public.ecr.aws/b3h0q7i6/challenge:${{ github.sha }}
-        docker tag challenge:latest public.ecr.aws/b3h0q7i6/challenge:latest
-        docker push public.ecr.aws/b3h0q7i6/challenge:${{ github.sha }}
-        docker push public.ecr.aws/b3h0q7i6/challenge:latest
+      - name: Build and push Docker image
+        run: |
+          IMAGE_ID=ghcr.io/${{ github.repository }}
+          IMAGE_TAG=$(echo ${{ github.sha }} | cut -c1-7)
+
+          docker build --tag $IMAGE_ID:$IMAGE_TAG .
+          docker push $IMAGE_ID:$IMAGE_TAG
 
   test:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v2
+      - name: Checkout code
+        uses: actions/checkout@v2
 
-    - name: Install packages
-      run: npm install
+      - name: Install packages
+        run: npm install
 
-    - name: Run tests
-      run: npm run test
+      - name: Run tests
+        run: npm run test
 
   deploy-production:
     needs: [build, test]
@@ -44,76 +45,37 @@ jobs:
     if: startsWith(github.ref, 'refs/heads/main')
 
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v2
+      - name: Checkout code
+        uses: actions/checkout@v2
 
-    - name: Install Helm
-      run: |
-        curl https://raw.githubusercontent.com/helm/helm/master/scripts/get-helm-3 | bash
-        helm repo add stable https://charts.helm.sh/stable
-    - name: Configure AWS credentials
-      run: |
-        mkdir -p $HOME/.aws
-        echo "[default]" >> $HOME/.aws/credentials
-        echo "aws_access_key_id=${{ secrets.AWS_ACCESS_KEY_ID }}" >> $HOME/.aws/credentials
-        echo "aws_secret_access_key=${{ secrets.AWS_SECRET_ACCESS_KEY }}" >> $HOME/.aws/credentials
-        echo "region=${{ secrets.AWS_REGION }}" >> $HOME/.aws/credentials
-    - name: Deploy to AWS
-      run: |
-        # Crear el archivo kubeconfig
-        echo "${{ secrets.KUBECONFIG }}" > kubeconfig.yaml
-        # Copiar el archivo kubeconfig a ~/.kube/
-        mkdir -p $HOME/.kube/
-        cp kubeconfig.yaml $HOME/.kube/config
+      - name: Install Helm
+        run: |
+          curl https://raw.githubusercontent.com/helm/helm/master/scripts/get-helm-3 | bash
+          helm repo add stable https://charts.helm.sh/stable
 
-        echo ${{ secrets.AWS_LOGIN_PASSWORD }} | docker login -u AWS --password-stdin https://public.ecr.aws/b3h0q7i6
+      - name: Configure AWS credentials
+        run: |
+          mkdir -p $HOME/.aws
+          echo "[default]" >> $HOME/.aws/credentials
+          echo "aws_access_key_id=${{ secrets.AWS_ACCESS_KEY_ID }}" >> $HOME/.aws/credentials
+          echo "aws_secret_access_key=${{ secrets.AWS_SECRET_ACCESS_KEY }}" >> $HOME/.aws/credentials
+          echo "region=${{ secrets.AWS_REGION }}" >> $HOME/.aws/credentials
 
-        export API_VERSION="$(grep "appVersion" chart/backend-api/Chart.yaml | cut -d" " -f2)"
-        export RELEASE_NAME="production"
+      - name: Deploy to AWS
+        run: |
+          # Crear el archivo kubeconfig
+          echo "${{ secrets.KUBECONFIG }}" > kubeconfig.yaml
+          # Copiar el archivo kubeconfig a ~/.kube/
+          mkdir -p $HOME/.kube/
+          cp kubeconfig.yaml $HOME/.kube/config
 
-        helm upgrade --install ${RELEASE_NAME} chart/backend-api \
-          --set image.tag="${{ github.sha }}" \
-          --set tls.certData="${{ secrets.SSL_CRT }}" \
-          --set tls.keyData="${{ secrets.SSL_KEY }}" \
-        -n production -f chart/values-production.yaml
+          echo ${{ secrets.AWS_LOGIN_PASSWORD }} | docker login -u AWS --password-stdin https://public.ecr.aws/b3h0q7i6
 
-  deploy-development:
-    needs: [build, test]
-    runs-on: ubuntu-latest
+          export API_VERSION="$(grep "appVersion" chart/backend-api/Chart.yaml | cut -d" " -f2)"
+          export RELEASE_NAME="production"
 
-    if: "!startsWith(github.ref, 'refs/heads/main')"
-
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v2
-
-    - name: Install Helm
-      run: |
-        curl https://raw.githubusercontent.com/helm/helm/master/scripts/get-helm-3 | bash
-        helm repo add stable https://charts.helm.sh/stable
-
-    - name: Configure AWS credentials
-      run: |
-        mkdir -p $HOME/.aws
-        echo "[default]" >> $HOME/.aws/credentials
-        echo "aws_access_key_id=${{ secrets.AWS_ACCESS_KEY_ID }}" >> $HOME/.aws/credentials
-        echo "aws_secret_access_key=${{ secrets.AWS_SECRET_ACCESS_KEY }}" >> $HOME/.aws/credentials
-        echo "region=${{ secrets.AWS_REGION }}" >> $HOME/.aws/credentials
-        
-    - name: Deploy to AWS
-      run: |
-        # Configuración de kubeconfig
-        echo "${{ secrets.KUBECONFIG }}" > kubeconfig.yaml
-        mkdir -p $HOME/.kube/
-        cp kubeconfig.yaml $HOME/.kube/config
-
-        echo ${{ secrets.AWS_LOGIN_PASSWORD }} | docker login -u AWS --password-stdin https://public.ecr.aws/b3h0q7i6
-
-        export API_VERSION="$(grep "appVersion" chart/backend-api/Chart.yaml | cut -d" " -f2)"
-        export RELEASE_NAME="development"
-
-        helm upgrade --install ${RELEASE_NAME} chart/backend-api \
-          --set image.tag="${{ github.sha }}" \
-          --set tls.certData="${{ secrets.SSL_CRT }}" \
-          --set tls.keyData="${{ secrets.SSL_KEY }}" \
-        -n development -f chart/values-development.yaml
+          helm upgrade --install ${RELEASE_NAME} chart/backend-api \
+            --set image.tag="${{ github.sha }}" \
+            --set tls.certData="${{ secrets.SSL_CRT }}" \
+            --set tls.keyData="${{ secrets.SSL_KEY }}" \
+          -n production -f chart/values-production.yaml
